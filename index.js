@@ -30,11 +30,7 @@ let access_token;
 let access_token_expiry;
 
 const byteSize = str => new Blob([str]).size;
-
-// const base64 = {
-//     decode: s => Buffer.from(s, 'base64'),
-//     encode: b => Buffer.from(b).toString('base64')
-// };
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const sendUpdate = async (body) => {
 
@@ -50,8 +46,11 @@ const sendUpdate = async (body) => {
 
         const partsPerEvent = 256
         while(body.length) {
-            const data = base64.bytesToBase64(new Uint8Array(body.splice(0, partsPerEvent)))
+            const ints = body.splice(0, partsPerEvent)
+            // console.log(JSON.stringify(ints));
+            const data = base64.bytesToBase64(new Uint8Array(ints))
             await particle.publishEvent({ name: 'imageUpdate', data, auth: access_token });
+            await sleep(1000);
         }
     } catch (e) {
         console.error('Error while queueing update', e)
@@ -70,6 +69,40 @@ const startServer = async () => {
         const port = process.env.PORT || 8000;
         app.listen(port, () => {
             console.log(`Example app listening at http://localhost:${port}`)
+        })
+
+        app.get('/test/half', async (req, res) => {
+            const imageData = []
+            const max = 16
+            const hmax = Math.floor(max/2);
+            for (let x = 0; x < max; x++) {
+                for (let y = 0; y < max; y++) {
+                    imageData.push(PIXEL_MAP[x][y])
+                    if (x > hmax && y > hmax) {
+                        imageData.push(255, 255, 255)
+                    } else {
+                        imageData.push(0, 0, 0);
+                    }
+                }
+            }
+            await sendUpdate(imageData)
+            return res.status(200).send('ok')
+        })
+
+        app.get('/test/:x/:y', async(req, res) => {
+            const imageData = []
+            for(let x=0; x < 16; x++) {
+                for (let y = 0; y < 16; y++) {
+                    imageData.push(PIXEL_MAP[x][y])
+                    if (`${x}` === req.params.x && `${y}` === req.params.y) {
+                        imageData.push(255,255,255)
+                    } else {
+                        imageData.push(0,0,0);
+                    }
+                }
+            }
+            await sendUpdate(imageData)
+            return res.status(200).send('ok')
         })
 
         app.post('/upload', async (req, res) => {
