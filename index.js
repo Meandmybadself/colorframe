@@ -5,6 +5,7 @@ const bodyParser = require('body-parser')
 const jimp = require('jimp');
 const os = require('os')
 const fileUpload = require('express-fileupload')
+const base64 = require('byte-base64')
 
 const PIXEL_MAP = [
     [0,1,5,6,14,15,27,28,44,45,65,66,90,91,119,120],
@@ -28,16 +29,29 @@ const PIXEL_MAP = [
 let access_token;
 let access_token_expiry;
 
-const queueUpdate = async (body) => {
+const byteSize = str => new Blob([str]).size;
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const sendUpdate = async (body) => {
 
     if (!access_token || access_token_expiry < Date.now()) {
         await refreshToken()
     }
 
-    console.log()
-
     try {
-        await particle.publishEvent({ name: 'imageUpdate', data: JSON.stringify(body), auth: access_token });
+        // total body's going to be 1368 bytes when we turn it into a base64'd string.
+        // the particle event limit is 623 bytes per event.
+        // we need 4 payloads to fit our data into that limit while ensuring 
+        // that we don't split a pixel's data across events.
+
+        const partsPerEvent = 256
+        while(body.length) {
+            const ints = body.splice(0, partsPerEvent)
+            // console.log(JSON.stringify(ints));
+            const data = base64.bytesToBase64(new Uint8Array(ints))
+            await particle.publishEvent({ name: 'imageUpdate', data, auth: access_token });
+            await sleep(1000);
+        }
     } catch (e) {
         console.error('Error while queueing update', e)
     }
@@ -47,41 +61,79 @@ const startServer = async () => {
     try {
         const app = express()
         app.use(bodyParser.json())
-
-        // Note that this option available for versions 1.0.0 and newer. 
         app.use(fileUpload({
             useTempFiles: true,
             tempFileDir: os.tmpdir()
         }));
-
-        // app.post('/update', async (req, rsp) => queueUpdate(rsp.body))
 
         const port = process.env.PORT || 8000;
         app.listen(port, () => {
             console.log(`Example app listening at http://localhost:${port}`)
         })
 
+        app.get('/test/half', async (req, res) => {
+            const imageData = []
+            const max = 16
+            const hmax = Math.floor(max/2);
+            for (let x = 0; x < max; x++) {
+                for (let y = 0; y < max; y++) {
+                    imageData.push(PIXEL_MAP[x][y])
+                    if (x > hmax && y > hmax) {
+                        imageData.push(255, 255, 255)
+                    } else {
+                        imageData.push(0, 0, 0);
+                    }
+                }
+            }
+            await sendUpdate(imageData)
+            return res.status(200).send('ok')
+        })
+
+        app.get('/test/:x/:y', async(req, res) => {
+            const imageData = []
+            for(let x=0; x < 16; x++) {
+                for (let y = 0; y < 16; y++) {
+                    imageData.push(PIXEL_MAP[x][y])
+                    if (`${x}` === req.params.x && `${y}` === req.params.y) {
+                        imageData.push(255,255,255)
+                    } else {
+                        imageData.push(0,0,0);
+                    }
+                }
+            }
+            await sendUpdate(imageData)
+            return res.status(200).send('ok')
+        })
+
         app.post('/upload', async (req, res) => {
-            console.log(req.files.image)
+            if (!req.files.image.mimetype.includes('image')) {
+                res.status(400).error('Invalid file type.')
+                return
+            }
+
+            if (!req.files.image.size > 10000000) {
+                res.status(400).error('Too big.')
+                return
+            }
 
             const image = await jimp.read(req.files.image.tempFilePath)
             await image.resize(16, 16, jimp.RESIZE_NEAREST_NEIGHBOR)
 
             const imageData = []
             for(let x=0; x < image.bitmap.width; x++) {
-                // imageData.push([])
                 for(let y=0; y < image.bitmap.height; y++) {
                     const color = jimp.intToRGBA(image.getPixelColor(x,y));
-                    imageData.push([
+                    imageData.push(
                         PIXEL_MAP[x][y], // pixel
                         color.r,
                         color.g,
                         color.b
-                    ])
+                    )
                 }
             }
 
-            await queueUpdate(imageData)
+            await sendUpdate(imageData)
+            return res.status(200).send('ok')
         });
     } catch (e) {
         console.error('Could not log in.', e);
